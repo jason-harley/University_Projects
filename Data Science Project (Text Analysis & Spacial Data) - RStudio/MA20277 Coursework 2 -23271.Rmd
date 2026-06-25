@@ -1,0 +1,303 @@
+---
+title: "MA20277 2022 - Coursework 2"
+author: "Candidate Number: 23271"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(ggmap)
+library(sf)
+library(spatstat)
+library(spData)
+library(tinytex)
+library(textdata)
+library(sp)
+library(gstat)
+library(tidytext)
+library(tidyverse)
+library(maptools)
+library(latex2exp)
+```
+
+### **Question 1 [9 marks]**
+
+We want to analyze the books "Anne of Green Gables" and "Blue Castle" by Lucy Maud Montgomery. The two books are provided in the files "Anne of Green Gables.txt" and "Blue Castle.txt".
+
+a) *Visualize the frequency of the 10 most frequent words that satisfy the following three criteria: (1) The word occurs at least five times in each book, (2) The word is not a stop word according to the usual stop list considered in the lectures, (3) The word is not "I’m", "don’t", "it’s", "didn’t", "I’ve" or "I’ll".* **[6 marks]**
+    
+First we load the data, convert it into a tidy format, and count the appearances of each word in the books.
+
+```{r}
+AOGG_raw = readLines("Anne of Green Gables.txt")
+AOGG_raw = data.frame(text=AOGG_raw)
+AOGG_tidy = AOGG_raw %>% unnest_tokens(word,text)
+AOGG_tidy$word = gsub( "\\_", "", AOGG_tidy$word)
+
+BC_raw = readLines("Blue Castle.txt")
+BC_raw = data.frame(text=BC_raw)
+BC_tidy = BC_raw %>% unnest_tokens(word,text)
+BC_tidy$word = gsub( "\\_", "", BC_tidy$word)
+
+AOGG_count = AOGG_tidy %>% 
+  count(word, sort=TRUE)
+
+BC_count = BC_tidy %>% 
+  count(word, sort=TRUE)
+```
+Next we filter the data according to the required criteria.
+```{r}
+data("stop_words")
+
+AOGG_BC_count = full_join(AOGG_count, BC_count, by='word') %>% 
+# First we filter out the words that appear less than 5 times in each book
+  filter(n.x >= 5, n.y >= 5) %>% 
+# We then calculate the total frequencies of each word
+  mutate("total" = n.x+n.y) %>% 
+# u2019 is the unicode character apostrophe, which needs formatting for stop-word removal
+  mutate(word = gsub("\u2019", "'", word)) %>% 
+# We can now filter out the stop-words, which includes the specific words in criteria 3
+  anti_join(stop_words, by="word") %>%
+# After filtering out the stop-words we extract the top 10 most frequent words
+  arrange(desc(total)) %>% 
+  slice_head(n=10)
+```
+We can now visualise the 10 most frequent words using an ordered bar-plot.
+```{r, fig.align='center', out.height='60%', out.width='60%'}
+ggplot(AOGG_BC_count, aes(x=total, y=reorder(word, total))) + geom_col() +
+labs(x="Count", y = "Word", 
+title="Frequency of top 10 most frequent words that meet the three criteria") +
+theme( axis.title=element_text(size=15), axis.text=element_text(size=15) )
+```
+The plot shows that (by a considerable margin), 'time' is the most common word that meets the required criteria.
+
+b) *Some scholars say that "Anne of Green Gables" is patterned after the book "Rebecca of Sunnybrook Farm" by Kate Douglas Wiggin. The text for "Rebecca of Sunnybrook Farm" is provided in the file "Rebecca of Sunnybrook Farm.txt". Extract the top two words with the highest term frequency-inverse document frequency for each of the two books, "Anne of Green Gables" and "Rebecca of Sunnybrook Farm", with the corpus only containing these books.* **[3 marks]**
+
+First we read and tidy the text for Rebecca of Sunnybrook Farm.
+
+```{r}
+ROSF_raw = readLines("Rebecca of Sunnybrook Farm.txt")
+ROSF_raw = data.frame(text=ROSF_raw)
+ROSF_tidy = ROSF_raw %>% unnest_tokens(word,text)
+ROSF_tidy$word = gsub( "\\_", "", ROSF_tidy$word)
+```
+As the books are not stored in a corpus, we use the 'pivot_longer' function to assign each word its respective book title, so we can keep track of which book each appearance of a word is from.
+```{r}
+AOGG_longer = AOGG_tidy %>% 
+  rename(AOGG = word) %>% 
+  pivot_longer(cols=AOGG, names_to="title")
+
+ROSF_longer = ROSF_tidy %>% 
+  rename(ROSF = word) %>% 
+  pivot_longer(cols=ROSF, names_to="title")
+```
+Now we calculate and extract the 2 words of highest term frequency-inverse document frequency for each book.
+```{r}
+full_join(AOGG_longer,ROSF_longer, by=c("title","value")) %>% 
+  rename(word=value) %>% 
+  count(title,word,sort=T) %>% 
+  bind_tf_idf(word,title,n) %>% 
+  mutate(word = gsub("\u2019", "'", word)) %>% 
+  arrange(desc(tf_idf)) %>% 
+  group_by(title) %>% 
+  slice_max(n=2, tf_idf)
+```
+We observe that the two words of highest term frequency-inverse document frequency are mostly the names of the protagonists in each book, we also have the common contraction 'don't; these words are also specific to their respective books as they all have an IDF of $\log2 \approx 0.693$ .
+
+### **Question 2 [9 marks]**
+
+We were given PM10 measurements from 60 measurement stations in the Greater Manchester area, including the locations of the stations. The data can be found in the file "Manchester.csv". A detailed description of the variables is provided in the file "DataDescriptions.pdf".
+
+a) *Visualize the data in an informative way and provide an interpretation of your data graphic.* **[3 marks]**
+
+To visualise the data we define the plot dimensions based on the data and use a stamen map alongside a scatter-plot to show the relative PM10 measurements across the Greater-Manchester area.
+```{r, message=FALSE, fig.align='center', out.width='80%', out.height='80%'}
+Manchester = read.csv('Manchester.csv')
+
+PlotDim = c( left=min(Manchester$Lon)-0.01, right=max(Manchester$Lon)+0.01,
+              top=max(Manchester$Lat)+0.01, bottom=min(Manchester$Lat)-0.01)
+
+ggmap(get_stamenmap(PlotDim, maptype="terrain", zoom=12)) + 
+  geom_point(data=Manchester, aes(x=Lon, y=Lat, color=Level), size=2.5) +
+  theme_bw() + scale_color_distiller( palette="Reds", trans="reverse") +
+  labs(x="Longitude", y="Latitude", color=TeX("PM10 $(\\mu$g/$m^{3})$"),
+  title="Map to show PM10 measurements") +
+  theme(axis.title=element_text(size=10), axis.text=element_text(size=10))
+```
+Using shades of red as a visual cue, we see that measurement stations located close to Manchester city center record higher PM10 measurements (indicated by darker-coloured points), which is understandable as the city's infrastructure is likely to cause the area to have greater air pollution than the more rural surrounding areas.
+
+b) *Explore the spatial dependence of the PM10 measurements.* **[3 marks]**
+
+As seen in the previous plot, the stations closer to the city center tend to exhibit higher PM10 measurements, this suggests the data could be spatially dependent, of which we can explore using a semi-variogram.
+```{r, message=FALSE, fig.align='center', out.width='55%', out.height='55%'}
+Manchester_gamma = Manchester
+coordinates(Manchester_gamma) = ~Lon+Lat
+
+gamma_hat = variogram(object = Level~1, Manchester_gamma)
+ggplot(gamma_hat, aes(x=dist, y=gamma/2)) + geom_point(size=2) +
+  labs(x="Distance", y="Semi-variogram") + geom_smooth()
+```
+From the semi-variogram (with trend-curve) we see that spatial dependence decreases as distance increases, however the curve does not flatten out which suggests that we do not have spatial independence even at a distance of 0.06 .
+
+c) *Provide estimates of PM10 levels for two locations: (1) Latitude=53.354, Longitude=-2.275 and (2) Latitude=53.471, Longitude=-2.250. Comment on the reliability of your estimates.* **[3 marks]**
+
+We use the pre-defined IDW function to calculate the estimates.
+```{r}
+IDW = function( X, S, s_star, p){
+  d = sqrt( (S[,1]-s_star[1])^2 + (S[,2]-s_star[2])^2 )
+  w = d^(-p)
+  if( min(d) > 0 )
+    return( sum( X * w ) / sum( w ) )
+  else 
+    return( X[d==0] )
+}
+
+X = Manchester$Level
+S = cbind(Manchester$Lat, Manchester$Lon)
+
+IDW(X, S, c(53.354, -2.275), p=2)
+IDW(X, S, c(53.471, -2.250), p=2)
+```
+By comparing the coordinates of the given points with the map in part 'a' we see that the location (53.354, -2.275) is at the bottom-center of the map, where there are no close-by data points, hence this estimate is unlikely to yield great reliability. On the other hand, the point of location (53.471, -2.250) is located very centrally and close to many measurement stations, thus this estimate is likely to be reliable as there are many nearby points that will have sufficient weighting in the prediction to yield reliability.
+
+### **Question 3 [28 marks]**
+
+After hearing about the work you did for Utopia's health department, the country's police department got in touch. They need help with analyzing their 2015-2021 data regarding certain crimes. The data is provided in the file "UtopiaCrimes.csv" and a detailed explanation of the variables is provided in the file "Data Descriptions.pdf". 
+
+Utopia consists of 59 districts and a shapefile of Utopia is provided together with the other files. To hide Utopia's location, the latitude and longitude coordinates have been manipulated, but the provided shapes are correct. The districts vary in terms of their population and the population for each district is provided in the file "UtopiaPopulation.csv".  
+
+a) *What are the three most common crimes in Utopia? Create a map that visualizes the districts worst affected by the most common crime in terms of number of incidents per 1,000 population.* **[5 marks]**
+
+We first read the data and then count the crimes in each category to find those that are most common.
+```{r}
+Utopia_Crimes = read.csv("UtopiaCrimes.csv")
+Utopia_Crimes %>% 
+  count(Category, sort=TRUE) %>% slice_head(n=3)
+```
+The most common crime (by a considerable margin) is burglary; we can now use the population data for Utopia to find the districts worst affected by it per 1000 population.
+```{r}
+Utopia_Population = read.csv("UtopiaPopulation.csv")
+
+Utopia_Burglary = full_join(Utopia_Crimes, Utopia_Population, by="District_ID") %>% 
+  filter(Category == "Burglary") %>% 
+  group_by(District_ID) %>% 
+  add_count(Category) %>% 
+  mutate("Burg_per_1000" = (1000*n)/Population)
+```
+We now use the shape file for Utopia to create a map of this data.
+```{r, warning=FALSE, fig.align='center', out.height='70%', out.width='70%'}
+Utopia_sf = read_sf("UtopiaShapefile.shp") %>% 
+# In order to join data frames we must convert the district ID data to integer format 
+  mutate(NAME_1 = as.integer(gsub("District ", "", NAME_1))) %>% 
+  rename(District_ID=NAME_1)
+Utopia_Burglary_sf = inner_join(Utopia_sf, Utopia_Burglary, by="District_ID")
+
+ggplot(Utopia_Burglary_sf, aes(fill=Burg_per_1000)) + geom_sf() + 
+geom_sf_text(aes(label=District_ID),size=3) + theme_minimal() + coord_sf(ndiscr = 0) + 
+scale_fill_distiller(palette="Reds", trans="reverse" ) + theme(axis.text=element_blank(),                          axis.ticks=element_blank()) + labs(x="", y="", fill="Burglaries per \n 1000 population", 
+title="Burglaries per 1000 population across districts")
+```
+Using shades of red as a visual cue, the map shows us that districts 20 and 56 appear to be those worst affected by burglary per 1000 population.
+
+b) *You are told that District 44 is notorious for drug possession. The police is planning to conduct a raid to tackle the issue, but they are unsure on which area of the district they should focus on. Help them make the correct decision.* **[5 marks]**
+
+To analyse the spatial distribution of drug possession crimes in district 44, we first create a new data frame containing all the data for just this district; and then create a 'ppp' object of which we can use to advise the police on their raid.
+```{r}
+District_44 = Utopia_Crimes %>% 
+  inner_join(Utopia_sf, by="District_ID") %>% 
+  filter(District_ID == 44, Category == "Drug Possession")
+
+District_44_sp = as( District_44$geometry, "Spatial" )
+District_44_sp = slot( District_44_sp, "polygons" )
+District_44_win = lapply( District_44_sp, function(z) { SpatialPolygons(list(z)) } )
+District_44_win = lapply(District_44_win, as.owin )[[1]]
+
+District_44_ppp = ppp(x=District_44$Longitude, y=District_44$Latitude, 
+window = District_44_win)
+```
+Using this 'ppp' object we can now create maps to visualise the distribution of drug possession crimes across the district, such as a quadratcount, and a kernel intensity map.
+```{r, fig.align='center', out.height='60%', out.width='60%'}
+par(mfrow=c(1,2), mar=c(0,0,1,2))
+plot(quadratcount(District_44_ppp, nx=8, ny=8), main="Quadratcount (8x8 grid)")
+kernel_44 = density.ppp(District_44_ppp, edge=TRUE) # We correct for edge-effect bias
+plot(kernel_44, main="Kernel Intesity Map ")
+```
+The quadratcount shows us that the distribution is clearly not homogeneous, which is useful to the police as it means there are likely specific areas with greater levels the crime of which to consider for the raid. It also shows us that the South-central has highest counting square (73), with a few neighbouring squares of high counts also, however the North-East region also has several grid squares of similar high values in close proximity; suggesting either location could be an intelligent choice for the raid.
+
+From the kernel intensity plot we see that the areas previously mentioned are those that yield the highest intensity (indicated by the bright yellow shades). We also see that the North-East area yields the most intense 'glow' and does so within a small region of the district; which suggests this location is more favourable over the South-central area. Thus using our analysis of the spatial distribution of drug possession across district 44 I advise the police to conduct their raid in the North-East corner of the district.
+
+c) *The police would also like to understand which group of people is most at risk of a burglary. The possible victims are: "young single", "young couple", "middle-aged single", "middle-aged couple", "elderly single" and "elderly couple". Use the short description provided in "UtopiaCrimes.csv" to extract which group of people is suffering from the highest number of burglaries. What is the proportion of burglaries that involved more than two criminals?* **[4 marks]**
+
+To find out which group of people is suffering from the highest amount of burglaries, we split the crime descriptions given into their different parts, and then count across the victim category (for crimes of the burglary type).
+```{r}
+Utopia_Burglary_Descriptions = Utopia_Burglary %>%
+  separate(Description, into = c("Criminals", "Victims", "Method", "Other"), sep = " ;")
+Utopia_Burglary_Descriptions %>% 
+  group_by(Victims) %>% count(sort=TRUE)
+```
+The table shows us that elderly single people are those suffering from the highest number of burglaries; which is understandable as they are likely the easiest people for criminals to target. 
+
+To answer the second part of the question we now use the part of the crime descriptions that tells us the number of criminals involved, and thus the proportion we wish to find is the amount of burglaries involving more than 2 criminals, divided by the total number of burglaries.
+```{r}
+Utopia_Burglary_Descriptions %>%
+  group_by(Criminals) %>% 
+  select(Criminals) %>% 
+  summarize(n=n()) %>% 
+  summarize(Proportion = (n[1]+n[3])/sum(n)) #1,3 = ranks of counted descriptions
+```
+d) *Make up your own question and answer it. Your question should consider 1-2 aspects different to that in parts 3a)-3c). Originality will be rewarded.* **[7 marks]**
+
+'The Utopian police department has noticed that too many criminals are getting away with their actions, so they wish to train a new group of officers to tackle this issue; use the data to advise the department on where the new officers should be deployed, and what crimes they should be most vigilant of.'
+
+In order to effectively deploy the new officers, we need to find out which areas are in most need of greater police presence, we can assess this by calculating the percentage of crimes in which an arrest was made.
+```{r}
+Utopia_Arrests = Utopia_Crimes %>% 
+  mutate(Arrest = case_when(Arrest == "Yes" ~ 1, Arrest == "No" ~ 0)) %>% 
+  group_by(District_ID) %>% 
+  summarize("Arrest_Percentage" = 100*mean(Arrest))
+slice_min(Utopia_Arrests, Arrest_Percentage, n=5)
+```
+We can also plot the arrest percentage data on a map to visualise the differences and observe patterns across all of Utopia (we do not invert the shading scale we are looking for the lowest values).
+```{r, warning=FALSE, fig.align='center', out.height='70%', out.width='70%'}
+Utopia_Arrests_sf = inner_join(Utopia_sf, Utopia_Arrests, by="District_ID")
+
+ggplot(Utopia_Arrests_sf, aes(fill=Arrest_Percentage)) + geom_sf() + 
+geom_sf_text(aes(label=District_ID),size=3) + theme_minimal() + coord_sf(ndiscr = 0) + 
+scale_fill_distiller(palette="Reds") + theme(axis.text = element_blank(), 
+axis.ticks=element_blank()) + labs(x="",y="", fill="Arrest %", 
+title="Arrest percentage across Utopian districts")
+```
+The map shows us that districts in the East of Utopia tend to yield a higher arrest percentage than districts in the North, South and West-most regions. We also observe that neighboring districts 47, 57, and 55 are all in the bottom 5 districts for arrest percentage (with 55 being the worst), thus this is an ideal area to deploy the new officers.
+
+We can also advise on what crimes they should be particularly vigilant of by finding the crimes that have the lowest arrest percentage and those that are the most prevalent in the area.
+```{r, fig.align='center', out.height='70%', out.width='70%'}
+Utopia_Arrest_Category = Utopia_Crimes %>% 
+  filter(District_ID %in% c(57,55,47)) %>% 
+  mutate(Arrest = case_when(Arrest == "Yes" ~ 1, Arrest == "No" ~ 0)) %>% 
+  group_by(Category) %>% 
+  summarize("Arrest_Per" = 100*mean(Arrest), "Count" = n())
+
+ggplot(Utopia_Arrest_Category) + geom_col(aes(x=reorder(Category,Arrest_Per), 
+y=Arrest_Per)) + scale_x_discrete(guide = guide_axis(n.dodge=3)) + labs(x="Crime", 
+y="Arrest %", title="Arrest percentage across crimes for districts 57, 55, 47")
+```
+The plot tells us that robbery and arson are the most well-policed crimes in the chosen area, and that burglary and assault are the worst. We can also find out which crimes are the most prevalent in the area:
+```{r}
+slice_max(Utopia_Arrest_Category, Count, n=3)
+```
+We see that much like for the whole of Utopia (recall from part 'a'), burglary appears to be the most common crime, and for the chosen region we also see that it has the lowest arrest percentage, thus it should be a specific focus for the new group of officers when they begin policing the chosen districts.
+
+e) *Write a short (two paragraphs) report about the findings of your analysis in parts a-d. The report should be readable for people without data science knowledge. Make it sound interesting and state possible recommendations that may be of interest to Utopia's police department. * **[7 marks]**
+
+From the findings in part 'a' and 'd' we found out that burglary appears to be the worst-policed crime in Utopia, and by quite a considerable margin; therefore this should be a prime-focus of the police department moving forward. I would recommend to the police department to conduct specific training for all officers in dealing with burglaries, and perhaps bring in some well-trained detectives to study the district-wide issue, allowing the different districts to report their issues and work together to combat the problem. The installation of security equipment (locks, cameras, alarms, etc) could also help combat the crime as there would be greater surveillance and deterrents for the burglars and other types of criminals also. This ties in with our findings in part 'c', in which we discover that elderly single people are worst affected by burglaries, thus extra surveillance/security could be particularly helpful in these areas where more vulnerable people live.
+
+My final piece of advice for the Utopian police department relates to our findings in part 'b', we see that a large portion of district 44's drug possession crimes occur in the North-West region of the district (the region in which the police should likely conduct their raid). From the shape file map we see that this area of district 44 closely borders districts 17 and 45, so my advice would be to collaborate with the police forces in these two districts to observe and combat drug possession crimes that may be occurring near and across these district borders; as greater enforcement at these borders could help the department greatly in fighting potential inter-district crimes.
